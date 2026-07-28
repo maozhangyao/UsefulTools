@@ -1,92 +1,154 @@
-# powerCopy 使用说明
+# powerCopy 使用手册
 
 ## 概述
 
-递归复制源文件夹下**所有子文件夹**的文件到目标文件夹，保留相对层级关系，支持超长路径（>260字符）。
+`powerCopy.ps1` 是一个 PowerShell 脚本，用于将源目录中的文件按原有层级结构批量复制到目标目录。支持两种处理模式和超长路径（突破 Windows 260 字符 MAX_PATH 限制）。
 
-## 适用场景
-
-- 需要将多个子目录中的文件"摊平层级"但保留每个子目录内部的目录结构
-- 源路径可能很长（超过 Windows 260字符 MAX_PATH 限制）
-
-## 核心逻辑
-
-```
-源文件夹 D:/rootDir/
-├── dirA/
-│   ├── file1.txt        →  D:/destDir/file1.txt
-│   └── sub/
-│       └── file2.txt    →  D:/destDir/sub/file2.txt
-├── dirB/
-│   └── data.log         →  D:/destDir/data.log
-└── rootFile.txt         ← 忽略（源文件夹根级文件不处理）
-```
-
-**关键规则**：路径层级从**被 copy 的子文件夹**开始计算，不是从源文件夹。
+---
 
 ## 参数说明
 
-| 参数 | 必填 | 说明 |
-|------|------|------|
-| `-Source` | 是 | 源文件夹路径（位置 0，可直接放第一个参数） |
-| `-Destination` | 是 | 目标文件夹路径（位置 1） |
-| `-NoClobber` | 否 | 开关，启用时不覆盖已存在的文件。默认覆盖。 |
-| `-WhatIf` | 否 | 开关，预览模式，只显示将要 copy 的文件，不实际执行。 |
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `-Source` | string | 是 | — | 源文件夹路径（位置 0，可作为第一个参数直接传入） |
+| `-Destination` | string | 是 | — | 目标文件夹路径（位置 1） |
+| `-FromSubDirs` | switch | 否 | `$false` | **模式 B**：以源文件夹的直接子文件夹为根处理；默认是**模式 A**：以源文件夹本身为根 |
+| `-NoRecurse` | switch | 否 | `$false` | 不递归，仅处理根目录下的直接文件（跳过子文件夹） |
+| `-NoClobber` | switch | 否 | `$false` | 目标文件已存在时跳过，不覆盖 |
+| `-WhatIf` | switch | 否 | `$false` | 预览模式，只显示将要复制的文件列表，不实际执行 |
+
+---
+
+## 两种处理模式
+
+### 模式 A（默认）：以源文件夹本身为根
+
+递归处理源文件夹下所有文件及子文件夹，路径从源文件夹开始计算。
+
+```
+源: D:\rootDir\file.txt          →  D:\destDir\file.txt
+源: D:\rootDir\sub\d.txt         →  D:\destDir\sub\d.txt
+```
+
+### 模式 B（`-FromSubDirs`）：以子文件夹为根
+
+遍历源文件夹的每个直接子文件夹，分别作为处理单元。路径从子文件夹开始计算（子文件夹本身不包含在路径中）。
+
+```
+源: D:\rootDir\dir001\file.txt   →  D:\destDir\file.txt
+源: D:\rootDir\dir001\sub\d.txt  →  D:\destDir\sub\d.txt
+源: D:\rootDir\dir002\data.log   →  D:\destDir\data.log
+```
+
+---
 
 ## 使用示例
 
+### 基本用法
+
 ```powershell
-# 基本用法
+# 模式 A：以源文件夹为根，递归复制
 .\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir
 
-# 不覆盖已有文件
-.\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir -NoClobber
-
-# 预览（不实际 copy）
-.\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir -WhatIf
-
-# 使用位置参数（等效于第一种）
-.\powerCopy.ps1 D:\rootDir D:\destDir
+# 模式 B：以子文件夹为根，递归复制
+.\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir -FromSubDirs
 ```
+
+### 不递归
+
+```powershell
+# 模式 A，仅复制源文件夹根目录下的直接文件
+.\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir -NoRecurse
+
+# 模式 B，仅复制各子文件夹根目录下的直接文件
+.\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir -FromSubDirs -NoRecurse
+```
+
+### 文件覆盖控制
+
+```powershell
+# 禁止覆盖已有文件
+.\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir -NoClobber
+```
+
+### 预览模式
+
+```powershell
+# 只显示将复制的文件，不实际执行
+.\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir -WhatIf
+```
+
+### 组合使用
+
+```powershell
+.\powerCopy.ps1 D:\rootDir D:\destDir -FromSubDirs -NoRecurse -NoClobber -WhatIf
+```
+
+---
 
 ## 输出说明
 
+```
+===== powerCopy =====
+  Source      : D:\rootDir
+  Destination : D:\destDir
+  FromSubDirs : True
+  NoRecurse   : False
+  NoClobber   : False
+
+--- [dir001] ---
+[OK]   file.txt
+[OVR]  data.log
+[SKIP] config.ini
+[FAIL] bad.txt : CopyFileW failed (error 5)
+
+===== Complete =====
+  Copied  : 1
+  Skipped : 1
+  Errors  : 1
+```
+
+### 状态标记
+
 | 标记 | 含义 |
 |------|------|
-| `[OK]` | 成功 copy 新文件 |
+| `[OK]` | 成功复制新文件 |
 | `[OVR]` | 覆盖已有文件 |
 | `[SKIP]` | 跳过已有文件（仅 `-NoClobber` 时出现） |
-| `[FAIL]` | copy 失败 |
-| `[WhatIf]` | 预览模式下的提示 |
+| `[FAIL]` | 复制失败（附带错误信息） |
+| `[WhatIf]` | 预览模式，不会实际执行 |
+
+---
 
 ## 超长路径支持
 
-Windows 默认路径长度限制为 260 字符。本脚本通过以下方式突破该限制：
+Windows 默认路径长度限制为 260 字符。本脚本通过 Win32 API + `\\?\` 扩展路径前缀突破该限制：
 
-1. **文件枚举**：使用 `[System.IO.Directory]::GetFiles()` + `\\?\` 前缀递归扫描文件
-2. **目录创建**：使用 `kernel32!CreateDirectoryW` + `\\?\` 前缀逐级创建目录
-3. **文件复制**：使用 `kernel32!CopyFileW` + `\\?\` 前缀直接操作文件
+1. **文件枚举**：`[System.IO.Directory]::GetFiles()` 配合 `\\?\` 前缀递归扫描
+2. **目录创建**：`kernel32!CreateDirectoryW` 配合 `\\?\` 前缀逐级创建
+3. **文件复制**：`kernel32!CopyFileW` 配合 `\\?\` 前缀直接操作
 
-这意味着即使源目录下有超过 260 字符路径的文件，也能正确处理。
+支持 UNC 网络路径（自动转换为 `\\?\UNC\` 格式）。
 
-## 内部实现
+---
 
-- `Add-Type` 编译 C# P/Invoke 代码，引入 `CreateDirectoryW` 和 `CopyFileW` Win32 API
-- `ConvertToExtendedPath()`：将普通路径转换为 `\\?\` 前缀的扩展长度路径格式
-- `Ensure-Directory()`：逐级创建目录，每级调用 `CreateDirectoryW`，遇 `ERROR_ALREADY_EXISTS` (183) 时跳过
+## 注意事项
+
+- 源文件夹不存在时报错退出（exit code 1）
+- 目标文件夹不存在时自动创建（`-WhatIf` 模式下不创建）
+- 路径分隔符兼容 `\` 和 `/`
+- 支持绝对路径、相对路径、UNC 网络路径
+- 单个文件/子文件夹处理失败不影响整体流程（错误隔离）
+- 源文件夹为空或无子文件夹时正常退出，提示无内容可复制
+- 使用 `-WhatIf` 时输出末尾会额外提示 `[WhatIf] mode finished. No files were copied.`
+
+---
 
 ## 文件清单
 
 ```
-powerCopy.ps1         - 正式脚本
-powerCopy_manual.md   - 本说明文件
-test_powerCopy.ps1    - 测试脚本（含 6 个测试用例）
+powerCopy.ps1          - 主脚本
+powerCopy_manual.md    - 本使用手册
+test_powerCopy.ps1     - 测试脚本（16 个测试用例，25 项断言）
+powerCopy.PRD.md       - 产品需求文档
 ```
-
-## 注意事项
-
-- 目标文件夹不存在时会自动创建
-- 脚本仅处理源文件夹的**直接子文件夹**，不处理源文件夹根目录下的文件
-- 如有同名文件，默认覆盖（`-NoClobber` 可禁止覆盖）
-- 不会递归处理子文件夹的文件夹作为新的源——只有源文件夹的 1 级子文件夹会被处理
-- 使用 `Get-ChildItem -Directory` 获取子文件夹列表，不会因单个子文件夹枚举失败而中断整个流程

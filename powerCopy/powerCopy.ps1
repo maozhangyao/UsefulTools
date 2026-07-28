@@ -1,32 +1,35 @@
 <#
 .SYNOPSIS
-    Recursively copy files from each subdirectory of Source to Destination.
+    Copy files from Source to Destination with two configurable modes and long-path support.
 .DESCRIPTION
-    powerCopy processes every immediate subdirectory under Source, finds all
-    files recursively within each, and copies them to Destination while
-    preserving their relative path structure rooted at each subdirectory.
+    Mode A (default)  : Source folder itself is the root — all its content is copied.
+    Mode B (-FromSubDirs): Each immediate subfolder under Source is a root — content
+                          from each subfolder is copied separately.
 
-    Long paths (>260 characters) are handled via P/Invoke Win32 API (kernel32).
+    Supports -NoRecurse (flat), -NoClobber (no overwrite), and -WhatIf (preview).
+    Long paths (>260 chars) are handled via Win32 API + \\?\ prefix.
 .PARAMETER Source
-    Source directory. Its immediate subdirectories are processed.
-    The Source directory itself is not copied.
+    Source folder path (position 0). Supports absolute, relative, UNC paths.
 .PARAMETER Destination
-    Destination directory where files will be copied into.
-    Created automatically if it does not exist.
+    Destination folder path (position 1). Created automatically if missing.
+.PARAMETER FromSubDirs
+    Switch: process each immediate subfolder under Source as a separate root (Mode B).
+    Default: Source itself is the root (Mode A).
+.PARAMETER NoRecurse
+    Switch: do not recurse into subfolders — only root-level files are processed.
 .PARAMETER NoClobber
-    If specified, existing files in Destination will NOT be overwritten.
-    By default, files are overwritten silently.
+    Switch: skip existing destination files instead of overwriting.
 .PARAMETER WhatIf
-    Preview the operations without actually copying any files.
+    Switch: preview mode — list files without copying.
 .EXAMPLE
-    PS> .\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir
-    Copy all files from each subdir of rootDir into destDir.
+    PS> .\powerCopy.ps1 D:\rootDir D:\destDir
+    Mode A: copy everything under rootDir into destDir.
 .EXAMPLE
-    PS> .\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir -NoClobber
-    Copy but do NOT overwrite existing files.
+    PS> .\powerCopy.ps1 D:\rootDir D:\destDir -FromSubDirs
+    Mode B: copy content from each subfolder of rootDir into destDir.
 .EXAMPLE
-    PS> .\powerCopy.ps1 -Source D:\rootDir -Destination D:\destDir -WhatIf
-    Preview only, no actual copy.
+    PS> .\powerCopy.ps1 D:\rootDir D:\destDir -FromSubDirs -NoRecurse -NoClobber -WhatIf
+    Preview Mode B flat copy without overwriting.
 #>
 
 param(
@@ -36,8 +39,9 @@ param(
     [Parameter(Mandatory = $true, Position = 1)]
     [string]$Destination,
 
+    [switch]$FromSubDirs,
+    [switch]$NoRecurse,
     [switch]$NoClobber,
-
     [switch]$WhatIf
 )
 
@@ -82,78 +86,115 @@ function Ensure-Directory {
     }
 }
 
-# ---- Validate ----
-$Source = $Source.TrimEnd('\')
-$Destination = $Destination.TrimEnd('\')
+function Get-Files {
+    param([string]$RootPath, [bool]$Recurse)
+    $searchOption = if ($Recurse) { [System.IO.SearchOption]::AllDirectories } else { [System.IO.SearchOption]::TopDirectoryOnly }
+    $extPaths = try {
+        [System.IO.Directory]::GetFiles((ConvertToExtendedPath $RootPath), '*', $searchOption)
+    } catch {
+        throw $_
+    }
+    return $extPaths
+}
+
+function Write-Config {
+    Write-Host "`n===== powerCopy =====" -ForegroundColor Cyan
+    Write-Host "  Source      : $Source" -ForegroundColor Cyan
+    Write-Host "  Destination : $Destination" -ForegroundColor Cyan
+    Write-Host "  FromSubDirs : $($FromSubDirs.IsPresent)" -ForegroundColor Cyan
+    Write-Host "  NoRecurse   : $($NoRecurse.IsPresent)" -ForegroundColor Cyan
+    Write-Host "  NoClobber   : $($NoClobber.IsPresent)" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+function Write-Summary {
+    param([int]$Copied, [int]$Skipped, [int]$Errors)
+    Write-Host "`n===== Complete =====" -ForegroundColor Cyan
+    Write-Host "  Copied  : $Copied" -ForegroundColor Green
+    Write-Host "  Skipped : $Skipped" -ForegroundColor DarkGray
+    Write-Host "  Errors  : $Errors" -ForegroundColor Red
+}
+
+# Ensure paths are absolute for consistent handling
+$Source = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Source)
+$Destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
 
 if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
     Write-Error "Source directory not found: $Source"
     exit 1
 }
 
-# ---- Get immediate subdirectories under Source ----
-$subDirs = Get-ChildItem -LiteralPath $Source -Directory -ErrorAction SilentlyContinue
-if (-not $subDirs) {
-    Write-Host "No subdirectories found under: $Source" -ForegroundColor Yellow
-    exit 0
-}
-
-# ---- Ensure Destination exists ----
+# Create destination if needed
 if (-not (Test-Path -LiteralPath $Destination -PathType Container)) {
-    Write-Host "Creating destination: $Destination" -ForegroundColor Yellow
-    Ensure-Directory $Destination
+    if (-not $WhatIf) {
+        Ensure-Directory $Destination
+    }
 }
 
-Write-Host "`n===== powerCopy =====" -ForegroundColor Cyan
-Write-Host "  Source      : $Source" -ForegroundColor Cyan
-Write-Host "  Destination : $Destination" -ForegroundColor Cyan
-Write-Host "  NoClobber   : $($NoClobber.IsPresent)" -ForegroundColor Cyan
-Write-Host "  Subdirs     : $($subDirs.Count)" -ForegroundColor Cyan
-Write-Host ""
+Write-Config
 
-# ---- Process each subdirectory ----
 $totalCopied = 0
 $totalSkipped = 0
 $totalErrors = 0
 
-foreach ($subDir in $subDirs) {
-    # Use extended path (.NET) for recursive file enumeration to handle >260 chars
+# ---- Determine processing roots ----
+$roots = @()
+if ($FromSubDirs) {
+    # Mode B: each immediate subfolder is a root
+    $subDirs = Get-ChildItem -LiteralPath $Source -Directory -ErrorAction SilentlyContinue
+    foreach ($d in $subDirs) { $roots += @{ Path = $d.FullName; Label = $d.Name } }
+    if ($roots.Count -eq 0) {
+        Write-Host "No subdirectories found under: $Source" -ForegroundColor Yellow
+        exit 0
+    }
+} else {
+    # Mode A: Source itself is the root
+    $roots += @{ Path = $Source; Label = $null }
+}
+
+# ---- Process each root ----
+foreach ($root in $roots) {
+    if ($FromSubDirs -and $root.Label) {
+        Write-Host "--- [$($root.Label)] ---" -ForegroundColor Green
+    }
+
     $rawPaths = try {
-        [System.IO.Directory]::GetFiles(
-            (ConvertToExtendedPath $subDir.FullName),
-            '*',
-            [System.IO.SearchOption]::AllDirectories
-        )
+        Get-Files -RootPath $root.Path -Recurse (-not $NoRecurse)
     } catch {
-        Write-Warning "  [SKIP] $($subDir.Name) : cannot enumerate files ($($_.Exception.Message))"
+        if ($FromSubDirs) {
+            Write-Host "  [SKIP] $($root.Label) : cannot enumerate files ($($_.Exception.Message))" -ForegroundColor DarkGray
+        } else {
+            Write-Host "  [SKIP] cannot enumerate files ($($_.Exception.Message))" -ForegroundColor DarkGray
+        }
         $totalErrors++
         continue
     }
+
     if (-not $rawPaths) { continue }
 
-    Write-Host "[$($subDir.Name)] scanning $($rawPaths.Count) files..." -ForegroundColor Green
-
     foreach ($extPath in $rawPaths) {
-        # Strip \\?\ prefix from .NET-returned path
         $cleanPath = $extPath
         if ($cleanPath -match '^\\\\\?\\') {
             $cleanPath = $cleanPath.Substring(4)
         }
 
-        $relativePath = $cleanPath.Substring($subDir.FullName.Length).TrimStart('\')
+        $relativePath = $cleanPath.Substring($root.Path.Length).TrimStart('\')
         $destPath = Join-Path -Path $Destination -ChildPath $relativePath
         $destParent = Split-Path -Path $destPath -Parent
 
         if ($WhatIf) {
-            Write-Host "  [WhatIf] $relativePath" -ForegroundColor DarkYellow
+            if ($FromSubDirs) {
+                Write-Host "  [WhatIf] $relativePath" -ForegroundColor DarkYellow
+            } else {
+                Write-Host "  [WhatIf] $relativePath" -ForegroundColor DarkYellow
+            }
             continue
         }
 
         try {
-            # Check if destination file exists and NoClobber is set
             $fileExists = [System.IO.File]::Exists((ConvertToExtendedPath $destPath))
             if ($NoClobber -and $fileExists) {
-                Write-Host "  [SKIP] $relativePath (already exists)" -ForegroundColor DarkGray
+                Write-Host "  [SKIP] $relativePath" -ForegroundColor DarkGray
                 $totalSkipped++
                 continue
             }
@@ -168,29 +209,19 @@ foreach ($subDir in $subDirs) {
             }
 
             if ($fileExists) {
-                Write-Host "  [OVR] $relativePath" -ForegroundColor Yellow
+                Write-Host "  [OVR]  $relativePath" -ForegroundColor Yellow
             } else {
-                Write-Host "  [OK]  $relativePath" -ForegroundColor Green
+                Write-Host "  [OK]   $relativePath" -ForegroundColor Green
             }
             $totalCopied++
-        }
-        catch {
-            Write-Warning "  [FAIL] $relativePath : $_"
+        } catch {
+            Write-Host "  [FAIL] $relativePath : $_" -ForegroundColor Red
             $totalErrors++
         }
     }
 }
 
-# ---- Summary ----
-if (-not $WhatIf) {
-    Write-Host "`n===== Complete =====" -ForegroundColor Cyan
-    Write-Host "  Copied  : $totalCopied" -ForegroundColor Green
-    if ($NoClobber -and $totalSkipped -gt 0) {
-        Write-Host "  Skipped : $totalSkipped" -ForegroundColor DarkGray
-    }
-    if ($totalErrors -gt 0) {
-        Write-Host "  Errors  : $totalErrors" -ForegroundColor Red
-    }
-} else {
+Write-Summary -Copied $totalCopied -Skipped $totalSkipped -Errors $totalErrors
+if ($WhatIf) {
     Write-Host "`n[WhatIf] mode finished. No files were copied." -ForegroundColor DarkYellow
 }
